@@ -7,7 +7,6 @@
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css"/>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -198,6 +197,10 @@ header{display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1
 .schema-copy-btn{width:100%;padding:5px;border-radius:5px;border:1px solid var(--border);background:transparent;color:var(--muted);font-family:'Space Mono',monospace;font-size:.6rem;cursor:pointer;transition:all .18s}
 .schema-copy-btn:hover{border-color:var(--cc);color:var(--cc)}
 .unsaved-dot{width:6px;height:6px;border-radius:50%;background:var(--cd);display:inline-block;margin-left:4px;flex-shrink:0}
+
+.db-config-path{display:flex;flex-direction:column;gap:3px;background:var(--bg);border:1px solid var(--border);border-radius:5px;padding:7px 9px}
+.db-config-file{font-family:'Space Mono',monospace;font-size:.68rem;color:var(--cc);font-weight:700}
+.db-config-hint{font-family:'Space Mono',monospace;font-size:.56rem;color:var(--muted)}
 
 /* ── TAG MANAGER ── */
 .tag-mgr{display:flex;flex-direction:column;gap:8px}
@@ -418,21 +421,22 @@ header{display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1
       <div class="db-section">
         <div class="vlabel lc">// Supabase Connection</div>
 
-        <div class="db-field">
-          <label class="db-field-label">Project URL</label>
-          <input class="db-input" id="db-url" placeholder="https://xxxx.supabase.co" autocomplete="off" spellcheck="false">
+        <div class="db-info-box" id="db-info-box">
+          Checking <b>supabase-config.js</b>…
         </div>
+
         <div class="db-field">
-          <label class="db-field-label">Anon / Public Key</label>
-          <input class="db-input" id="db-key" type="password" placeholder="eyJhbGciOi…" autocomplete="off">
+          <div class="db-field-label">Config file</div>
+          <div class="db-config-path">
+            <span class="db-config-file" id="db-config-file">supabase-config.js</span>
+            <span class="db-config-hint">Edit this file to set your credentials</span>
+          </div>
         </div>
 
         <div class="db-btn-row">
-          <button class="db-connect-btn" onclick="connectSupabase()">Connect</button>
+          <button class="db-connect-btn" onclick="reconnectSupabase()">↻ Reconnect</button>
           <button class="db-schema-btn" onclick="toggleSchema()">SQL Schema</button>
         </div>
-
-        <div class="db-info-box" id="db-info-box">Enter your Supabase URL and anon key, then click <b>Connect</b>.<br>Use <b>SQL Schema</b> to get the setup script to run in Supabase.</div>
 
         <div id="schema-area" style="display:none;flex-direction:column;gap:5px">
           <div class="db-field-label">Run this in Supabase → SQL Editor:</div>
@@ -1552,9 +1556,9 @@ async function confirmImport(){
 }
 
 // ═══════════════════════════════════════════════════════
-// SUPABASE INTEGRATION
+// SUPABASE INTEGRATION  (client injected via ES module)
 // ═══════════════════════════════════════════════════════
-let sbClient = null;
+let sbClient = null;       // set by initSupabase() after module loads
 let dbConnected = false;
 let unsavedChanges = false;
 
@@ -1601,11 +1605,68 @@ create table if not exists zm_filter_state (
 -- alter table zm_tags enable row level security;
 -- alter table zm_filter_state enable row level security;`;
 
+// Called from the ES module <script> block at the bottom of the file
+async function initSupabase(client, isConfigured, projectUrl){
+  const info = document.getElementById('db-info-box');
+  const fileEl = document.getElementById('db-config-file');
+
+  if(!isConfigured || !client){
+    setDBStatus('error', 'Not configured');
+    setDBButtons(false);
+    info.innerHTML = `<span class="warn">⚠ Credentials not set.</span><br>
+      Open <b>supabase-config.js</b> and replace the placeholder URL and key with your Supabase project credentials.<br><br>
+      Find them in: <b>Supabase Dashboard → Project Settings → API</b>`;
+    return;
+  }
+
+  sbClient = client;
+  setDBStatus('saving', 'Connecting…');
+  info.innerHTML = `Connecting to <b>${projectUrl}</b>…`;
+
+  try {
+    const { error } = await sbClient.from('zm_maps').select('id').limit(1);
+
+    if(error){
+      if(error.code === '42P01'){
+        setDBStatus('error', 'Tables missing');
+        setDBButtons(false);
+        info.innerHTML = `<span class="warn">⚠ Connected, but tables not found.</span><br>
+          Click <b>SQL Schema</b> and run the setup SQL in your Supabase SQL Editor first.`;
+      } else {
+        throw error;
+      }
+      return;
+    }
+
+    dbConnected = true;
+    setDBStatus('connected', 'Connected');
+    setDBButtons(true);
+    info.innerHTML = `<span class="ok">✓ Connected to Supabase.</span><br>
+      Use <b>↑ Save</b> to push all data, or <b>↓ Load</b> to pull from the database.`;
+
+  } catch(e) {
+    setDBStatus('error', 'Error');
+    dbConnected = false;
+    setDBButtons(false);
+    info.innerHTML = `<span class="err">⚠ ${e.message || 'Connection failed.'}</span><br>
+      Check your credentials in <b>supabase-config.js</b> and try again.`;
+  }
+}
+
+// ── Reconnect (manual button) ─────────────────────────
+async function reconnectSupabase(){
+  if(!sbClient){
+    showToast('No client — check supabase-config.js', 'error');
+    return;
+  }
+  await initSupabase(sbClient, true, '…');
+}
+
 // ── UI helpers ────────────────────────────────────────
 function setDBStatus(state, label){
   const dot = document.getElementById('db-dot');
   const lbl = document.getElementById('db-label');
-  dot.className = 'db-dot'+(state?' '+state:'');
+  dot.className = 'db-dot' + (state ? ' ' + state : '');
   lbl.textContent = label;
 }
 
@@ -1615,162 +1676,88 @@ function setDBButtons(enabled){
 }
 
 function renderDBPane(){
-  // Restore saved creds from sessionStorage (not localStorage — cleared on tab close)
-  const savedUrl = sessionStorage.getItem('zm_sb_url')||'';
-  const savedKey = sessionStorage.getItem('zm_sb_key')||'';
-  if(savedUrl) document.getElementById('db-url').value = savedUrl;
-  if(savedKey) document.getElementById('db-key').value = savedKey;
   document.getElementById('schema-box').textContent = SCHEMA_SQL;
 }
 
 function toggleSchema(){
   const area = document.getElementById('schema-area');
   document.getElementById('schema-box').textContent = SCHEMA_SQL;
-  area.style.display = area.style.display==='none' ? 'flex' : 'none';
+  area.style.display = area.style.display === 'none' ? 'flex' : 'none';
 }
 
 function copySchema(){
-  navigator.clipboard.writeText(SCHEMA_SQL).then(()=>showToast('SQL copied to clipboard.','success'));
-}
-
-// ── Connect ───────────────────────────────────────────
-async function connectSupabase(){
-  const url = document.getElementById('db-url').value.trim();
-  const key = document.getElementById('db-key').value.trim();
-  const info = document.getElementById('db-info-box');
-
-  if(!url||!key){
-    info.innerHTML='<span class="err">⚠ Enter both URL and key.</span>';
-    return;
-  }
-
-  // Basic URL validation
-  if(!url.startsWith('https://')){
-    document.getElementById('db-url').classList.add('error');
-    info.innerHTML='<span class="err">⚠ URL must start with https://</span>';
-    return;
-  }
-  document.getElementById('db-url').classList.remove('error');
-
-  setDBStatus('saving','Connecting…');
-  info.innerHTML='Connecting to Supabase…';
-
-  try {
-    sbClient = supabase.createClient(url, key);
-
-    // Test connection by querying zm_maps
-    const { error } = await sbClient.from('zm_maps').select('id').limit(1);
-
-    if(error){
-      if(error.code==='42P01'){
-        // Table doesn't exist yet
-        setDBStatus('error','Tables missing');
-        info.innerHTML=`<span class="warn">⚠ Connected, but tables not found.</span><br>Click <b>SQL Schema</b> and run the setup SQL in your Supabase dashboard first.`;
-        dbConnected = false;
-        setDBButtons(false);
-      } else {
-        throw error;
-      }
-      return;
-    }
-
-    dbConnected = true;
-    setDBStatus('connected','Connected');
-    setDBButtons(true);
-    sessionStorage.setItem('zm_sb_url', url);
-    sessionStorage.setItem('zm_sb_key', key);
-    info.innerHTML=`<span class="ok">✓ Connected successfully.</span><br>Use <b>↑ Save</b> to push all data, or <b>↓ Load</b> to pull from Supabase.`;
-
-  } catch(e){
-    setDBStatus('error','Error');
-    dbConnected = false;
-    setDBButtons(false);
-    info.innerHTML=`<span class="err">⚠ ${e.message||'Connection failed.'}</span><br>Check your URL and key and try again.`;
-  }
+  navigator.clipboard.writeText(SCHEMA_SQL).then(() => showToast('SQL copied to clipboard.', 'success'));
 }
 
 // ── SAVE ─────────────────────────────────────────────
 async function saveToSupabase(){
-  if(!dbConnected||!sbClient){ showToast('Not connected to Supabase.','error'); return; }
+  if(!dbConnected || !sbClient){ showToast('Not connected to Supabase.', 'error'); return; }
 
-  setDBStatus('saving','Saving…');
+  setDBStatus('saving', 'Saving…');
   const saveBtn = document.getElementById('save-btn');
   saveBtn.disabled = true;
 
   try {
-    // 1. Save tag lists
-    await sbClient.from('zm_tags').delete().neq('id',0);  // clear all
+    // 1. Tag lists
+    await sbClient.from('zm_tags').delete().neq('id', 0);
     const tagRows = [
-      ...branches.map(n=>({type:'branch',name:n})),
-      ...categories.map(n=>({type:'category',name:n}))
+      ...branches.map(n => ({ type:'branch', name:n })),
+      ...categories.map(n => ({ type:'category', name:n }))
     ];
     if(tagRows.length){
-      const {error:te} = await sbClient.from('zm_tags').insert(tagRows);
+      const { error:te } = await sbClient.from('zm_tags').insert(tagRows);
       if(te) throw te;
     }
 
-    // 2. Save filter state
-    await sbClient.from('zm_filter_state').delete().neq('id',0);
+    // 2. Filter state
+    await sbClient.from('zm_filter_state').delete().neq('id', 0);
     const filterRows = [
-      ...[...activeFilters.country].map(v=>({type:'country',value:v})),
-      ...[...activeFilters.branch].map(v=>({type:'branch',value:v})),
-      ...[...activeFilters.cat].map(v=>({type:'cat',value:v}))
+      ...[...activeFilters.country].map(v => ({ type:'country', value:v })),
+      ...[...activeFilters.branch].map(v => ({ type:'branch', value:v })),
+      ...[...activeFilters.cat].map(v => ({ type:'cat', value:v }))
     ];
     if(filterRows.length){
-      const {error:fe} = await sbClient.from('zm_filter_state').insert(filterRows);
+      const { error:fe } = await sbClient.from('zm_filter_state').insert(filterRows);
       if(fe) throw fe;
     }
 
-    // 3. Save maps + postcodes
+    // 3. Maps + postcodes
     for(const m of maps){
-      // Upsert map record
-      const {error:me} = await sbClient.from('zm_maps').upsert({
-        id: String(m.id),
-        name: m.name,
-        updated_at: new Date().toISOString()
+      const { error:me } = await sbClient.from('zm_maps').upsert({
+        id: String(m.id), name: m.name, updated_at: new Date().toISOString()
       });
       if(me) throw me;
 
-      // Delete existing postcodes for this map, re-insert
-      const {error:de} = await sbClient.from('zm_postcodes').delete().eq('map_id', String(m.id));
+      const { error:de } = await sbClient.from('zm_postcodes').delete().eq('map_id', String(m.id));
       if(de) throw de;
 
       const pcRows = [
-        ...m.postalA.map(p=>({
-          map_id:String(m.id), code:p.code, version:'a',
-          lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||''
-        })),
-        ...m.postalB.map(p=>({
-          map_id:String(m.id), code:p.code, version:'b',
-          lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||''
-        }))
+        ...m.postalA.map(p => ({ map_id:String(m.id), code:p.code, version:'a', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' })),
+        ...m.postalB.map(p => ({ map_id:String(m.id), code:p.code, version:'b', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' }))
       ];
-
       if(pcRows.length){
-        const {error:pe} = await sbClient.from('zm_postcodes').insert(pcRows);
+        const { error:pe } = await sbClient.from('zm_postcodes').insert(pcRows);
         if(pe) throw pe;
       }
     }
 
-    // Remove maps from DB that no longer exist locally
-    const localIds = maps.map(m=>String(m.id));
-    const {data:dbMaps} = await sbClient.from('zm_maps').select('id');
+    // Remove stale maps from DB
+    const localIds = maps.map(m => String(m.id));
+    const { data:dbMaps } = await sbClient.from('zm_maps').select('id');
     if(dbMaps){
-      const staleIds = dbMaps.map(r=>r.id).filter(id=>!localIds.includes(id));
-      for(const sid of staleIds){
-        await sbClient.from('zm_maps').delete().eq('id',sid);
-      }
+      const staleIds = dbMaps.map(r => r.id).filter(id => !localIds.includes(id));
+      for(const sid of staleIds) await sbClient.from('zm_maps').delete().eq('id', sid);
     }
 
-    setDBStatus('connected','Saved ✓');
-    showToast('All data saved to Supabase.','success');
+    setDBStatus('connected', 'Saved ✓');
+    showToast('All data saved to Supabase.', 'success');
     unsavedChanges = false;
     updateSaveIndicators();
 
   } catch(e){
-    setDBStatus('error','Save failed');
-    showToast(`Save error: ${e.message||e}`,'error');
-    document.getElementById('db-info-box').innerHTML=`<span class="err">⚠ Save failed: ${e.message||e}</span>`;
+    setDBStatus('error', 'Save failed');
+    showToast(`Save error: ${e.message || e}`, 'error');
+    document.getElementById('db-info-box').innerHTML = `<span class="err">⚠ Save failed: ${e.message || e}</span>`;
   } finally {
     saveBtn.disabled = false;
   }
@@ -1778,98 +1765,70 @@ async function saveToSupabase(){
 
 // ── LOAD ─────────────────────────────────────────────
 async function loadFromSupabase(){
-  if(!dbConnected||!sbClient){ showToast('Not connected to Supabase.','error'); return; }
+  if(!dbConnected || !sbClient){ showToast('Not connected to Supabase.', 'error'); return; }
 
-  setDBStatus('saving','Loading…');
+  setDBStatus('saving', 'Loading…');
   const loadBtn = document.getElementById('load-btn');
   loadBtn.disabled = true;
 
   try {
-    // 1. Load tag lists
-    const {data:tagData, error:te} = await sbClient.from('zm_tags').select('*').order('name');
+    // 1. Tag lists
+    const { data:tagData, error:te } = await sbClient.from('zm_tags').select('*').order('name');
     if(te) throw te;
-    branches   = (tagData||[]).filter(r=>r.type==='branch').map(r=>r.name);
-    categories = (tagData||[]).filter(r=>r.type==='category').map(r=>r.name);
+    branches   = (tagData||[]).filter(r => r.type==='branch').map(r => r.name);
+    categories = (tagData||[]).filter(r => r.type==='category').map(r => r.name);
 
-    // 2. Load filter state
-    const {data:filterData, error:fe} = await sbClient.from('zm_filter_state').select('*');
+    // 2. Filter state
+    const { data:filterData, error:fe } = await sbClient.from('zm_filter_state').select('*');
     if(fe) throw fe;
-    activeFilters.country.clear();
-    activeFilters.branch.clear();
-    activeFilters.cat.clear();
-    (filterData||[]).forEach(r=>{
-      if(activeFilters[r.type]) activeFilters[r.type].add(r.value);
-    });
+    activeFilters.country.clear(); activeFilters.branch.clear(); activeFilters.cat.clear();
+    (filterData||[]).forEach(r => { if(activeFilters[r.type]) activeFilters[r.type].add(r.value); });
 
-    // 3. Load maps + postcodes
-    const {data:mapsData, error:me} = await sbClient.from('zm_maps').select('*').order('created_at');
+    // 3. Maps + postcodes
+    const { data:mapsData, error:me } = await sbClient.from('zm_maps').select('*').order('created_at');
     if(me) throw me;
-
-    const {data:pcData, error:pe} = await sbClient.from('zm_postcodes').select('*');
+    const { data:pcData, error:pe } = await sbClient.from('zm_postcodes').select('*');
     if(pe) throw pe;
 
     if(mapsData && mapsData.length > 0){
-      // Destroy existing Leaflet maps
-      maps.forEach(m=>{ try{ m.leaflet.remove(); }catch(e){} });
-      maps=[];
-      document.getElementById('map-area').innerHTML='';
+      maps.forEach(m => { try{ m.leaflet.remove(); }catch(e){} });
+      maps = [];
+      document.getElementById('map-area').innerHTML = '';
 
       for(const mRow of mapsData){
         const entry = createMapInstance(mRow.id, mRow.name);
-        const pcs = (pcData||[]).filter(r=>r.map_id===String(mRow.id));
-
-        entry.postalA = pcs.filter(r=>r.version==='a').map(r=>({
-          code:r.code, version:'a', lat:r.lat, lng:r.lng,
-          country:r.country, branch:r.branch, cat:r.cat,
-          geocodedCountry:r.country
-        }));
-        entry.postalB = pcs.filter(r=>r.version==='b').map(r=>({
-          code:r.code, version:'b', lat:r.lat, lng:r.lng,
-          country:r.country, branch:r.branch, cat:r.cat,
-          geocodedCountry:r.country
-        }));
-
-        entry.inputA = entry.postalA.map(p=>p.code).join('\n');
-        entry.inputB = entry.postalB.map(p=>p.code).join('\n');
+        const pcs = (pcData||[]).filter(r => r.map_id === String(mRow.id));
+        entry.postalA = pcs.filter(r => r.version==='a').map(r => ({ code:r.code, version:'a', lat:r.lat, lng:r.lng, country:r.country, branch:r.branch, cat:r.cat, geocodedCountry:r.country }));
+        entry.postalB = pcs.filter(r => r.version==='b').map(r => ({ code:r.code, version:'b', lat:r.lat, lng:r.lng, country:r.country, branch:r.branch, cat:r.cat, geocodedCountry:r.country }));
+        entry.inputA = entry.postalA.map(p => p.code).join('\n');
+        entry.inputB = entry.postalB.map(p => p.code).join('\n');
       }
-
       switchToMap(maps[0].id);
     }
 
-    renderMapTabs();
-    renderTagLists();
-    refreshBulkSelects();
-    renderFilterPills();
-    renderCurrentMode();
-    renderPostcodeTable();
-    updateSaveIndicators();
+    renderMapTabs(); renderTagLists(); refreshBulkSelects();
+    renderFilterPills(); renderCurrentMode(); renderPostcodeTable(); updateSaveIndicators();
 
-    setDBStatus('connected','Loaded ✓');
-    showToast(`Loaded ${(mapsData||[]).length} map(s) from Supabase.`,'success');
+    setDBStatus('connected', 'Loaded ✓');
+    showToast(`Loaded ${(mapsData||[]).length} map(s) from Supabase.`, 'success');
 
-    // Update textarea displays for active map
     const entry = getActive();
     if(entry){
       document.getElementById('input-a').value = entry.inputA;
       document.getElementById('input-b').value = entry.inputB;
-    }
-
-    // Refresh chips display
-    if(entry){
       const chipsA = document.getElementById('chips-a');
       const chipsB = document.getElementById('chips-b');
-      chipsA.innerHTML='';
-      chipsB.innerHTML='';
-      entry.postalA.forEach(p=>{ const c=document.createElement('span'); c.className='chip chip-a'; c.textContent=p.code; chipsA.appendChild(c); });
-      entry.postalB.forEach(p=>{ const c=document.createElement('span'); c.className='chip chip-b'; c.textContent=p.code; chipsB.appendChild(c); });
+      chipsA.innerHTML = ''; chipsB.innerHTML = '';
+      entry.postalA.forEach(p => { const c=document.createElement('span'); c.className='chip chip-a'; c.textContent=p.code; chipsA.appendChild(c); });
+      entry.postalB.forEach(p => { const c=document.createElement('span'); c.className='chip chip-b'; c.textContent=p.code; chipsB.appendChild(c); });
       entry.chipsA = chipsA.innerHTML;
       entry.chipsB = chipsB.innerHTML;
     }
 
   } catch(e){
-    setDBStatus('error','Load failed');
-    showToast(`Load error: ${e.message||e}`,'error');
-    document.getElementById('db-info-box').innerHTML=`<span class="err">⚠ Load failed: ${e.message||e}</span>`;
+    setDBStatus('error', 'Load failed');
+    showToast(`Load error: ${e.message || e}`, 'error');
+    document.getElementById('db-info-box').innerHTML = `<span class="err">⚠ Load failed: ${e.message || e}</span>`;
   } finally {
     loadBtn.disabled = false;
   }
@@ -1884,39 +1843,32 @@ function markUnsaved(){
 function updateSaveIndicators(){
   const btn = document.getElementById('save-btn');
   if(!dbConnected) return;
-  if(unsavedChanges){
-    btn.textContent = '↑ Save ●';
-    btn.style.background = 'var(--cd)';
-  } else {
-    btn.textContent = '↑ Save';
-    btn.style.background = 'var(--cc)';
-  }
-}
-
-// ── Auto-reconnect on load if creds in sessionStorage ─
-async function tryAutoConnect(){
-  const url = sessionStorage.getItem('zm_sb_url');
-  const key = sessionStorage.getItem('zm_sb_key');
-  if(url && key){
-    document.getElementById('db-url').value = url;
-    document.getElementById('db-key').value = key;
-    await connectSupabase();
-  }
+  btn.textContent = unsavedChanges ? '↑ Save ●' : '↑ Save';
+  btn.style.background = unsavedChanges ? 'var(--cd)' : 'var(--cc)';
 }
 
 // ═══════════════════════════════════════════════════════
 // INIT
 // ═══════════════════════════════════════════════════════
-window.addEventListener('load',()=>{
-  const first=createMapInstance(Date.now(),'Map 1');
+window.addEventListener('load', () => {
+  const first = createMapInstance(Date.now(), 'Map 1');
   switchToMap(first.id);
   renderMapTabs();
   renderTagLists();
   refreshBulkSelects();
   renderDBPane();
   plotVersion('a');
-  tryAutoConnect();
+  // initSupabase() is called from the ES module <script> below
 });
+</script>
+
+<!-- ES module: imports Supabase client from config file and wires it into the app -->
+<script type="module">
+  import { supabaseClient, isConfigured, SUPABASE_URL } from './supabase-config.js';
+  // Wait for the main load listener to fire first, then connect
+  window.addEventListener('load', () => {
+    initSupabase(supabaseClient, isConfigured, SUPABASE_URL);
+  });
 </script>
 </body>
 </html>
