@@ -442,6 +442,9 @@ header{display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1
           <button class="db-schema-btn" style="flex:1" onclick="debugDirectInsert()">🔬 Test Insert</button>
           <button class="db-schema-btn" style="flex:1" onclick="debugInspectState()">🔍 Inspect State</button>
         </div>
+        <div class="db-btn-row" style="margin-top:4px">
+          <button class="db-schema-btn" style="flex:1;color:var(--ca);border-color:var(--ca)" onclick="regeocodeMissing()">↻ Geocode missing coords</button>
+        </div>
 
         <div id="schema-area" style="display:none;flex-direction:column;gap:5px">
           <div class="db-field-label">Run this in Supabase → SQL Editor:</div>
@@ -690,26 +693,54 @@ async function geocodePostal(code, preferCountry){
   const key = `${code}-${preferCountry||''}`;
   if(geocodeCache[key]) return geocodeCache[key];
 
-  const order = preferCountry==='AU' ? ['au','nz']
-              : preferCountry==='NZ' ? ['nz','au']
-              : ['au','nz'];
+  const order = preferCountry==='NZ' ? ['NZ','AU'] : ['AU','NZ'];
 
   for(const cc of order){
-    const url=`https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(code)}&format=json&limit=1&countrycodes=${cc}`;
-    try{
-      await sleep(130);
-      const res = await fetch(url,{headers:{'Accept-Language':'en','User-Agent':'ZoneMapper/1.0'}});
-      if(!res.ok){ console.warn(`Nominatim HTTP ${res.status} for ${code}/${cc}`); continue; }
-      const data = await res.json();
-      if(data&&data.length>0){
-        const result={lat:parseFloat(data[0].lat),lng:parseFloat(data[0].lon),geocodedCountry:cc.toUpperCase()};
-        geocodeCache[key]=result;
-        return result;
-      }
-    }catch(e){
-      console.error(`Geocode fetch error for ${code}/${cc}:`, e.message);
+    const result = await tryGeocode(code, cc);
+    if(result){
+      geocodeCache[key] = result;
+      return result;
     }
   }
+  return null;
+}
+
+async function tryGeocode(code, cc){
+  // Strategy 1: Zippopotam.us — CORS-safe, no auth needed
+  try{
+    const ccLower = cc.toLowerCase();
+    const url = `https://api.zippopotam.us/${ccLower}/${code}`;
+    const res = await fetch(url);
+    if(res.ok){
+      const data = await res.json();
+      if(data.places && data.places.length > 0){
+        return {
+          lat: parseFloat(data.places[0].latitude),
+          lng: parseFloat(data.places[0].longitude),
+          geocodedCountry: cc
+        };
+      }
+    }
+  } catch(e){ console.warn(`Zippopotam failed for ${code}/${cc}:`, e.message); }
+
+  await sleep(100);
+
+  // Strategy 2: Nominatim (no User-Agent header to avoid CORS preflight)
+  try{
+    const url = `https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(code)}&countrycodes=${cc.toLowerCase()}&format=json&limit=1`;
+    const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+    if(res.ok){
+      const data = await res.json();
+      if(data && data.length > 0){
+        return {
+          lat: parseFloat(data[0].lat),
+          lng: parseFloat(data[0].lon),
+          geocodedCountry: cc
+        };
+      }
+    }
+  } catch(e){ console.warn(`Nominatim failed for ${code}/${cc}:`, e.message); }
+
   return null;
 }
 
@@ -1936,6 +1967,52 @@ function updateSaveIndicators(){
   if(!dbConnected) return;
   btn.textContent = unsavedChanges ? '↑ Save ●' : '↑ Save';
   btn.style.background = unsavedChanges ? 'var(--cd)' : 'var(--cc)';
+}
+
+async function regeocodeMissing(){
+  const info = document.getElementById('db-info-box');
+  info.innerHTML = '<b>Geocoding missing coordinates...</b>';
+  const log = (msg, type) => {
+    const color = type==='ok'?'#f15d22':type==='err'?'#ff4444':'#aaa';
+    info.innerHTML += '<div style="color:'+color+';margin-top:2px;font-size:.58rem">'+msg+'</div>';
+  };
+
+  let total=0, done=0, failed=0;
+  // Count all missing
+  maps.forEach(m => {
+    [...m.postalA, ...m.postalB].forEach(p => { if(!p.lat) total++; });
+  });
+  log(`Found ${total} postcodes with no coordinates.`);
+  if(total===0){ log('Nothing to do!','ok'); return; }
+
+  for(const m of maps){
+    for(const list of [m.postalA, m.postalB]){
+      for(const p of list){
+        if(p.lat) continue;
+        const geo = await geocodePostal(p.code, p.country||'');
+        if(geo){
+          p.lat = geo.lat;
+          p.lng = geo.lng;
+          p.geocodedCountry = geo.geocodedCountry;
+          if(!p.country) p.country = geo.geocodedCountry;
+          done++;
+          log(`✓ ${p.code} → ${geo.lat.toFixed(3)}, ${geo.lng.toFixed(3)}`, 'ok');
+        } else {
+          failed++;
+          log(`✗ ${p.code} — still not found`, 'err');
+        }
+      }
+    }
+  }
+
+  log(`Done: ${done} geocoded, ${failed} failed.`, done>0?'ok':'err');
+  renderCurrentMode();
+  maps.forEach(m => fitMap(m));
+
+  if(done > 0 && dbConnected && sbClient){
+    log('Saving updated coords to DB...');
+    await saveToSupabase();
+  }
 }
 
 // ── DEBUG HELPERS ────────────────────────────────────
