@@ -1603,11 +1603,19 @@ create table if not exists zm_filter_state (
   unique(type, value)
 );
 
--- Enable Row Level Security (optional but recommended)
--- alter table zm_maps enable row level security;
--- alter table zm_postcodes enable row level security;
--- alter table zm_tags enable row level security;
--- alter table zm_filter_state enable row level security;`;
+-- IMPORTANT: Disable RLS so the anon key can read/write freely.
+-- (This tool uses the anon key directly — RLS would block all writes.)
+alter table zm_maps          disable row level security;
+alter table zm_postcodes     disable row level security;
+alter table zm_tags          disable row level security;
+alter table zm_filter_state  disable row level security;
+
+-- Grant full access to the anon and service roles
+grant all on zm_maps, zm_postcodes, zm_tags, zm_filter_state
+  to anon, authenticated, service_role;
+
+grant usage, select on all sequences in schema public
+  to anon, authenticated, service_role;`;
 
 // Called from the ES module <script> block at the bottom of the file
 async function initSupabase(client, isConfigured, projectUrl){
@@ -1741,23 +1749,43 @@ async function saveToSupabase(){
 
     // 3. Maps + postcodes
     for(const m of maps){
-      // Upsert map record
-      const { error:me } = await sbClient.from('zm_maps').upsert({
-        id: String(m.id), name: m.name, updated_at: new Date().toISOString()
-      }, { onConflict: 'id' });
-      if(me) throw me;
+      const mapId = String(m.id);
 
-      // Delete this map's postcodes by map_id (safe targeted delete), then re-insert
-      const { error:de } = await sbClient.from('zm_postcodes').delete().eq('map_id', String(m.id));
-      if(de) throw de;
+      // Upsert map record first (postcodes FK depends on this)
+      const { error:me } = await sbClient.from('zm_maps').upsert({
+        id: mapId, name: m.name, updated_at: new Date().toISOString()
+      }, { onConflict: 'id' });
+      if(me){
+        console.error('zm_maps upsert failed:', me);
+        throw new Error(`Map save failed: ${me.message}`);
+      }
+
+      // Delete existing postcodes for this map
+      const { error:de } = await sbClient.from('zm_postcodes').delete().eq('map_id', mapId);
+      if(de){
+        console.error('zm_postcodes delete failed:', de);
+        throw new Error(`Postcode clear failed: ${de.message}`);
+      }
 
       const pcRows = [
-        ...m.postalA.map(p => ({ map_id:String(m.id), code:p.code, version:'a', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' })),
-        ...m.postalB.map(p => ({ map_id:String(m.id), code:p.code, version:'b', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' }))
+        ...m.postalA.map(p => ({ map_id:mapId, code:p.code, version:'a', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' })),
+        ...m.postalB.map(p => ({ map_id:mapId, code:p.code, version:'b', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' }))
       ];
+
+      console.log(`Saving map "${m.name}" (id:${mapId}) — ${pcRows.length} postcodes`);
+
       if(pcRows.length){
-        const { error:pe } = await sbClient.from('zm_postcodes').insert(pcRows);
-        if(pe) throw pe;
+        // Batch insert in chunks of 200 to avoid Supabase payload limits
+        const CHUNK = 200;
+        for(let i = 0; i < pcRows.length; i += CHUNK){
+          const chunk = pcRows.slice(i, i + CHUNK);
+          const { error:pe } = await sbClient.from('zm_postcodes').insert(chunk);
+          if(pe){
+            console.error(`zm_postcodes insert failed (chunk ${i}–${i+chunk.length}):`, pe);
+            throw new Error(`Postcode insert failed: ${pe.message}`);
+          }
+        }
+        console.log(`✓ Saved ${pcRows.length} postcodes for map "${m.name}"`);
       }
     }
 
