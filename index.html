@@ -1705,38 +1705,42 @@ function copySchema(){
 async function saveToSupabase(){
   if(!dbConnected || !sbClient){ showToast('Not connected to Supabase.', 'error'); return; }
 
-  setDBStatus('saving', 'Saving…');
+  setDBStatus('saving', 'Saving...');
   const saveBtn = document.getElementById('save-btn');
+  const loadBtn = document.getElementById('load-btn');
   saveBtn.disabled = true;
+  loadBtn.disabled = true;
+
+  const info = document.getElementById('db-info-box');
+  const log = (msg, type) => {
+    const color = type==='ok' ? '#f15d22' : type==='err' ? '#ff4444' : '#aaa';
+    info.innerHTML += '<div style="color:'+color+';margin-top:2px;font-size:.58rem">'+msg+'</div>';
+    console.log('[ZM Save]', msg);
+  };
+  info.innerHTML = '<b>Saving...</b>';
 
   try {
-    // 1. Tag lists — upsert all, then delete any that are no longer present
+    // 1. Tags
+    log('Step 1: saving tags...');
     const tagRows = [
       ...branches.map(n => ({ type:'branch', name:n })),
       ...categories.map(n => ({ type:'category', name:n }))
     ];
     if(tagRows.length){
       const { error:te } = await sbClient.from('zm_tags').upsert(tagRows, { onConflict: 'type,name' });
-      if(te) throw te;
+      if(te){ log('tags error: '+te.message+' code:'+te.code, 'err'); throw te; }
     }
-    // Remove stale tags
     const { data:existingTags } = await sbClient.from('zm_tags').select('type,name');
-    if(existingTags){
-      for(const t of existingTags){
-        const stillExists = t.type==='branch' ? branches.includes(t.name) : categories.includes(t.name);
-        if(!stillExists){
-          await sbClient.from('zm_tags').delete().eq('type', t.type).eq('name', t.name);
-        }
-      }
+    for(const t of (existingTags||[])){
+      const still = t.type==='branch' ? branches.includes(t.name) : categories.includes(t.name);
+      if(!still) await sbClient.from('zm_tags').delete().eq('type',t.type).eq('name',t.name);
     }
+    log('tags done: '+tagRows.length+' rows', 'ok');
 
-    // 2. Filter state — delete all rows by their own values, then re-insert
-    const { data:existingFilters } = await sbClient.from('zm_filter_state').select('type,value');
-    if(existingFilters){
-      for(const f of existingFilters){
-        await sbClient.from('zm_filter_state').delete().eq('type', f.type).eq('value', f.value);
-      }
-    }
+    // 2. Filter state
+    log('Step 2: saving filters...');
+    const { data:ef } = await sbClient.from('zm_filter_state').select('type,value');
+    for(const f of (ef||[])) await sbClient.from('zm_filter_state').delete().eq('type',f.type).eq('value',f.value);
     const filterRows = [
       ...[...activeFilters.country].map(v => ({ type:'country', value:v })),
       ...[...activeFilters.branch].map(v => ({ type:'branch', value:v })),
@@ -1744,73 +1748,77 @@ async function saveToSupabase(){
     ];
     if(filterRows.length){
       const { error:fe } = await sbClient.from('zm_filter_state').insert(filterRows);
-      if(fe) throw fe;
+      if(fe){ log('filter error: '+fe.message, 'err'); throw fe; }
     }
+    log('filters done', 'ok');
 
     // 3. Maps + postcodes
+    log('Step 3: saving '+maps.length+' map(s)...');
     for(const m of maps){
       const mapId = String(m.id);
+      log('Map "'+m.name+'" id='+mapId+' | A='+m.postalA.length+' B='+m.postalB.length);
 
-      // Upsert map record first (postcodes FK depends on this)
-      const { error:me } = await sbClient.from('zm_maps').upsert({
-        id: mapId, name: m.name, updated_at: new Date().toISOString()
-      }, { onConflict: 'id' });
-      if(me){
-        console.error('zm_maps upsert failed:', me);
-        throw new Error(`Map save failed: ${me.message}`);
-      }
+      const { error:me } = await sbClient.from('zm_maps').upsert(
+        { id: mapId, name: m.name, updated_at: new Date().toISOString() },
+        { onConflict: 'id' }
+      );
+      if(me){ log('zm_maps error: '+me.message+' ('+me.code+')', 'err'); throw me; }
+      log('map row saved', 'ok');
 
-      // Delete existing postcodes for this map
       const { error:de } = await sbClient.from('zm_postcodes').delete().eq('map_id', mapId);
-      if(de){
-        console.error('zm_postcodes delete failed:', de);
-        throw new Error(`Postcode clear failed: ${de.message}`);
-      }
+      if(de){ log('delete postcodes error: '+de.message+' ('+de.code+')', 'err'); throw de; }
 
       const pcRows = [
         ...m.postalA.map(p => ({ map_id:mapId, code:p.code, version:'a', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' })),
         ...m.postalB.map(p => ({ map_id:mapId, code:p.code, version:'b', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' }))
       ];
 
-      console.log(`Saving map "${m.name}" (id:${mapId}) — ${pcRows.length} postcodes`);
-
-      if(pcRows.length){
-        // Batch insert in chunks of 200 to avoid Supabase payload limits
-        const CHUNK = 200;
-        for(let i = 0; i < pcRows.length; i += CHUNK){
-          const chunk = pcRows.slice(i, i + CHUNK);
-          const { error:pe } = await sbClient.from('zm_postcodes').insert(chunk);
-          if(pe){
-            console.error(`zm_postcodes insert failed (chunk ${i}–${i+chunk.length}):`, pe);
-            throw new Error(`Postcode insert failed: ${pe.message}`);
-          }
-        }
-        console.log(`✓ Saved ${pcRows.length} postcodes for map "${m.name}"`);
+      if(pcRows.length === 0){
+        log('WARNING: 0 postcodes to save. postalA='+m.postalA.length+' postalB='+m.postalB.length, 'err');
+        continue;
       }
+
+      log('inserting '+pcRows.length+' postcodes... sample: '+JSON.stringify(pcRows[0]));
+
+      const CHUNK = 100;
+      for(let i = 0; i < pcRows.length; i += CHUNK){
+        const chunk = pcRows.slice(i, i + CHUNK);
+        const { error:pe } = await sbClient.from('zm_postcodes').insert(chunk);
+        if(pe){
+          log('insert error rows '+i+'-'+(i+chunk.length)+': '+pe.message+' ('+pe.code+') hint:'+pe.hint+' detail:'+pe.details, 'err');
+          throw pe;
+        }
+        log('inserted rows '+i+'-'+(i+chunk.length), 'ok');
+      }
+      log('all '+pcRows.length+' postcodes saved for "'+m.name+'"', 'ok');
     }
 
-    // 4. Remove maps from DB that no longer exist locally
+    // 4. Remove stale maps
     const localIds = maps.map(m => String(m.id));
     const { data:dbMaps } = await sbClient.from('zm_maps').select('id');
     if(dbMaps){
-      const staleIds = dbMaps.map(r => r.id).filter(id => !localIds.includes(id));
-      for(const sid of staleIds) await sbClient.from('zm_maps').delete().eq('id', sid);
+      for(const r of dbMaps){
+        if(!localIds.includes(r.id)) await sbClient.from('zm_maps').delete().eq('id', r.id);
+      }
     }
 
-    setDBStatus('connected', 'Saved ✓');
+    setDBStatus('connected', 'Saved');
+    log('DONE - all data saved successfully', 'ok');
     showToast('Saved to Supabase.', 'success');
     unsavedChanges = false;
     updateSaveIndicators();
 
   } catch(e){
     setDBStatus('error', 'Save failed');
-    showToast(`Save error: ${e.message || e}`, 'error');
-    console.error('Supabase save error:', e);
-    document.getElementById('db-info-box').innerHTML = `<span class="err">⚠ Save failed: ${e.message || e}</span>`;
+    log('FATAL: '+(e.message||JSON.stringify(e)), 'err');
+    showToast('Save error: '+(e.message||e), 'error');
+    console.error('[ZM Save] Fatal:', e);
   } finally {
     saveBtn.disabled = false;
+    loadBtn.disabled = false;
   }
 }
+
 
 // ── LOAD ─────────────────────────────────────────────
 async function loadFromSupabase(){
