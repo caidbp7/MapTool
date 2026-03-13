@@ -1921,16 +1921,9 @@ window.addEventListener('load', () => {
 
 <!-- ES module: imports Supabase client from config file and wires it into the app -->
 <script type="module">
-  // The '?v=' + Date.now() trick forces a fresh download every time
-  import { supabaseClient, isConfigured, SUPABASE_URL } from './supabase-config.js?v=' + Date.now();
-  
-  window.addEventListener('load', () => {
-    // Small delay to ensure the UI is fully painted
-    setTimeout(() => {
-      console.log("Attempting to initialize Supabase with URL:", SUPABASE_URL);
-      initSupabase(supabaseClient, isConfigured, SUPABASE_URL);
-    }, 100);
-  });
+  import { supabaseClient, isConfigured, SUPABASE_URL } from './supabase-config.js';
+  // Call directly — the load event has already fired by the time a module script runs
+  initSupabase(supabaseClient, isConfigured, SUPABASE_URL);
 </script>
 </body>
 </html>
