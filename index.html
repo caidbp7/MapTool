@@ -687,7 +687,6 @@ function renderMapTabs(){
 function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
 async function geocodePostal(code, preferCountry){
-  // preferCountry: 'AU'|'NZ'|'' — tries this first
   const key = `${code}-${preferCountry||''}`;
   if(geocodeCache[key]) return geocodeCache[key];
 
@@ -699,14 +698,17 @@ async function geocodePostal(code, preferCountry){
     const url=`https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(code)}&format=json&limit=1&countrycodes=${cc}`;
     try{
       await sleep(130);
-      const res = await fetch(url,{headers:{'Accept-Language':'en'}});
+      const res = await fetch(url,{headers:{'Accept-Language':'en','User-Agent':'ZoneMapper/1.0'}});
+      if(!res.ok){ console.warn(`Nominatim HTTP ${res.status} for ${code}/${cc}`); continue; }
       const data = await res.json();
       if(data&&data.length>0){
         const result={lat:parseFloat(data[0].lat),lng:parseFloat(data[0].lon),geocodedCountry:cc.toUpperCase()};
         geocodeCache[key]=result;
         return result;
       }
-    }catch(e){}
+    }catch(e){
+      console.error(`Geocode fetch error for ${code}/${cc}:`, e.message);
+    }
   }
   return null;
 }
@@ -1490,12 +1492,12 @@ async function confirmImport(){
   });
 
   closeCSVModal();
-  showToast(`Geocoding ${toImport.length} postcodes…`,'');
+  showToast(`Importing ${toImport.length} postcodes…`,'');
 
   const entry = getActive();
   if(!entry) return;
 
-  // Existing map for overwrite logic
+  // ── Step 1: Store immediately with no geocoords, save to DB right away ──
   const existingList = importVersion==='a' ? entry.postalA : entry.postalB;
   const existingByCode = {};
   existingList.forEach(p=>{ existingByCode[p.code]=p; });
@@ -1505,45 +1507,21 @@ async function confirmImport(){
   toImport.forEach(r=>{ dedupMap[r.code]=r; });
   const unique = Object.values(dedupMap);
 
-  const geocoded = [];
-  let failed = 0;
-
-  for(const r of unique){
-    const preferCountry = r.country==='AU'||r.country==='NZ' ? r.country : '';
-    const geo = await geocodePostal(r.code, preferCountry);
-    if(geo){
-      geocoded.push({
-        code: r.code,
-        version: importVersion,
-        lat: geo.lat,
-        lng: geo.lng,
-        geocodedCountry: geo.geocodedCountry,
-        country: (r.country==='AU'||r.country==='NZ') ? r.country : geo.geocodedCountry,
-        branch: r.branch,
-        cat: r.cat
-      });
-    } else {
-      // Still include the postcode with null coords so it saves to DB
-      geocoded.push({
-        code: r.code,
-        version: importVersion,
-        lat: null,
-        lng: null,
-        geocodedCountry: '',
-        country: (r.country==='AU'||r.country==='NZ') ? r.country : '',
-        branch: r.branch,
-        cat: r.cat
-      });
-      failed++;
-      console.warn(`Geocode failed for ${r.code}`);
-    }
-  }
-
-  // Merge: overwrite existing, add new
+  // Build initial records (no lat/lng yet) — merge with existing
   const mergedByCode = {};
   existingList.forEach(p=>{ mergedByCode[p.code]=p; });
-  geocoded.forEach(p=>{ mergedByCode[p.code]=p; }); // overwrite
-
+  unique.forEach(r=>{
+    mergedByCode[r.code] = {
+      code: r.code,
+      version: importVersion,
+      lat: existingByCode[r.code]?.lat ?? null,
+      lng: existingByCode[r.code]?.lng ?? null,
+      geocodedCountry: existingByCode[r.code]?.geocodedCountry ?? '',
+      country: (r.country==='AU'||r.country==='NZ') ? r.country : (existingByCode[r.code]?.country||''),
+      branch: r.branch,
+      cat: r.cat
+    };
+  });
   const merged = Object.values(mergedByCode);
 
   if(importVersion==='a') entry.postalA = merged;
@@ -1568,21 +1546,50 @@ async function confirmImport(){
 
   renderTagLists();
   refreshBulkSelects();
-  renderCurrentMode();
   renderPostcodeTable();
   renderFilterPills();
-  fitMap(entry);
   markUnsaved();
 
-  const importMsg = failed > 0
-    ? `Imported ${geocoded.length}, ${failed} not geocoded.`
-    : `Imported ${geocoded.length} postcodes into Version ${importVersion.toUpperCase()}.`;
+  showToast(`Saved ${merged.length} postcodes. Geocoding in background…`,'success');
 
-  showToast(importMsg, failed > 0 ? 'error' : 'success');
-
-  // Auto-save to Supabase if connected
+  // ── Step 2: Save to DB immediately (with whatever coords we have) ──
   if(dbConnected && sbClient){
     await saveToSupabase();
+  }
+
+  // ── Step 3: Geocode in background, update coords as they come in ──
+  let geocoded=0, failed=0;
+  const needsGeocode = unique.filter(r => !existingByCode[r.code]?.lat);
+
+  for(const r of needsGeocode){
+    const preferCountry = r.country==='AU'||r.country==='NZ' ? r.country : '';
+    const geo = await geocodePostal(r.code, preferCountry);
+    const rec = (importVersion==='a' ? entry.postalA : entry.postalB).find(p=>p.code===r.code);
+    if(rec){
+      if(geo){
+        rec.lat = geo.lat;
+        rec.lng = geo.lng;
+        rec.geocodedCountry = geo.geocodedCountry;
+        if(!rec.country) rec.country = geo.geocodedCountry;
+        geocoded++;
+      } else {
+        failed++;
+        console.warn(`Geocode failed for ${r.code}`);
+      }
+    }
+  }
+
+  // ── Step 4: Re-render map and re-save with coords ──
+  renderCurrentMode();
+  fitMap(entry);
+
+  if(needsGeocode.length > 0){
+    if(geocoded > 0) showToast(`Geocoded ${geocoded} postcodes.${failed>0?' '+failed+' failed.':''}`, failed>0?'error':'success');
+    else if(failed > 0) showToast(`Geocoding failed for ${failed} postcodes — check console.`, 'error');
+
+    if(dbConnected && sbClient && geocoded > 0){
+      await saveToSupabase();
+    }
   }
 }
 
