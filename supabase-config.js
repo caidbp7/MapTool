@@ -11,8 +11,6 @@ export const SUPABASE_URL = 'https://npcwaisbspbhsaajawid.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im5wY3dhaXNic3BiaHNhYWphd2lkIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzM0MDkzMzMsImV4cCI6MjA4ODk4NTMzM30.Xr76V-dcAUKedmnHdTjIpD5w4ponDuik5Nvzp48vM6I';
 
 // Check if user has replaced placeholder values
-export const isConfigured = SUPABASE_URL !== 'https://your-project-url.supabase.co';
+export const isConfigured = true;
 
-export const supabaseClient = isConfigured 
-    ? createClient(SUPABASE_URL, SUPABASE_ANON_KEY) 
-    : null;
+export const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
