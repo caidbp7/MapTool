@@ -1523,7 +1523,19 @@ async function confirmImport(){
         cat: r.cat
       });
     } else {
+      // Still include the postcode with null coords so it saves to DB
+      geocoded.push({
+        code: r.code,
+        version: importVersion,
+        lat: null,
+        lng: null,
+        geocodedCountry: '',
+        country: (r.country==='AU'||r.country==='NZ') ? r.country : '',
+        branch: r.branch,
+        cat: r.cat
+      });
       failed++;
+      console.warn(`Geocode failed for ${r.code}`);
     }
   }
 
@@ -1784,8 +1796,8 @@ async function saveToSupabase(){
       if(de){ log('delete postcodes error: '+de.message+' ('+de.code+')', 'err'); throw de; }
 
       const pcRows = [
-        ...m.postalA.map(p => ({ map_id:mapId, code:p.code, version:'a', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' })),
-        ...m.postalB.map(p => ({ map_id:mapId, code:p.code, version:'b', lat:p.lat, lng:p.lng, country:p.country||'', branch:p.branch||'', cat:p.cat||'' }))
+        ...m.postalA.map(p => ({ map_id:mapId, code:p.code, version:'a', lat:p.lat??null, lng:p.lng??null, country:p.country||'', branch:p.branch||'', cat:p.cat||'' })),
+        ...m.postalB.map(p => ({ map_id:mapId, code:p.code, version:'b', lat:p.lat??null, lng:p.lng??null, country:p.country||'', branch:p.branch||'', cat:p.cat||'' }))
       ];
 
       if(pcRows.length === 0){
