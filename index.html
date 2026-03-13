@@ -1322,8 +1322,9 @@ function readCSVFile(file){
 }
 
 function parseCSV(text){
-  // Handles quoted fields, CRLF/LF
-  const lines = text.replace(/\r\n/g,'\n').replace(/\r/g,'\n').split('\n');
+  // Strip BOM (Excel exports), normalise line endings
+  text = text.replace(/^\uFEFF/, '').replace(/\r\n/g,'\n').replace(/\r/g,'\n');
+  const lines = text.split('\n');
   return lines.map(line => {
     const result = [];
     let cur = '', inQ = false;
@@ -1335,7 +1336,7 @@ function parseCSV(text){
     }
     result.push(cur.trim());
     return result;
-  }).filter(r=>r.length>0);
+  }).filter(r => r.length > 0 && r.some(c => c.trim() !== ''));
 }
 
 // ── Modal open/close ──────────────────────────────────
@@ -1362,6 +1363,17 @@ function populateColumnSelects(){
   const fields = ['map-postcode','map-country','map-branch','map-cat'];
   const labels = ['postcode','country','branch','category']; // for auto-detect
 
+  const autoDetect = [
+    // postcode: broad match
+    h => /post.?code|postal.?code|postcode|zip.?code|zipcode|\bpc\b|\bpost\b/i.test(h),
+    // country
+    h => /country|nation|\bctry\b/i.test(h),
+    // branch
+    h => /branch|office|location|store|\bloc\b/i.test(h),
+    // category
+    h => /categor|cat\b|type|group|class/i.test(h),
+  ];
+
   fields.forEach((id,i)=>{
     const sel = document.getElementById(id);
     sel.innerHTML = '<option value="">(none)</option>';
@@ -1370,13 +1382,8 @@ function populateColumnSelects(){
       o.value = h; o.textContent = h;
       sel.appendChild(o);
     });
-    // Auto-detect by fuzzy name match
-    const match = csvHeaders.find(h =>
-      h.toLowerCase().replace(/[^a-z]/g,'').includes(labels[i].replace(/[^a-z]/g,''))
-      || labels[i].includes(h.toLowerCase().replace(/[^a-z]/g,''))
-    );
+    const match = csvHeaders.find(h => autoDetect[i](h));
     if(match) sel.value = match;
-    // postcode is required — highlight if none found
     if(id==='map-postcode' && !match) sel.style.borderColor='var(--cb)';
     sel.onchange = ()=>{ if(id==='map-postcode') sel.style.borderColor=''; renderPreview(); };
   });
@@ -1411,7 +1418,8 @@ function renderPreview(){
   tbody.innerHTML='';
 
   csvRows.forEach((row,ri)=>{
-    const pc = colPC ? (row[idx(colPC)]||'').replace(/\s+/g,'') : '';
+    let pc = colPC ? (row[idx(colPC)]||'').toString().replace(/\s+/g,'') : '';
+    if(/^\d{3}$/.test(pc)) pc = '0' + pc;
     const isValid = /^\d{4}$/.test(pc);
     if(isValid) valid++; else invalid++;
 
@@ -1456,7 +1464,9 @@ async function confirmImport(){
   // Build rows
   const toImport = [];
   csvRows.forEach(row=>{
-    const pc = colPC ? (row[idx(colPC)]||'').replace(/\s+/g,'') : '';
+    let pc = colPC ? (row[idx(colPC)]||'').toString().replace(/\s+/g,'') : '';
+    // Excel strips leading zeros: "0800" → "800" — pad back to 4 digits
+    if(/^\d{3}$/.test(pc)) pc = '0' + pc;
     if(!/^\d{4}$/.test(pc)) return;
     toImport.push({
       code: pc,
