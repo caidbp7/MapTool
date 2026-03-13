@@ -693,56 +693,28 @@ async function geocodePostal(code, preferCountry){
   const key = `${code}-${preferCountry||''}`;
   if(geocodeCache[key]) return geocodeCache[key];
 
-  const order = preferCountry==='NZ' ? ['NZ','AU'] : ['AU','NZ'];
+  const order = preferCountry==='NZ' ? ['nz','au'] : ['au','nz'];
 
   for(const cc of order){
-    const result = await tryGeocode(code, cc);
-    if(result){
-      geocodeCache[key] = result;
-      return result;
+    try{
+      await sleep(200);
+      const url = `https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(code)}&countrycodes=${cc}&format=json&limit=1&addressdetails=0`;
+      const res = await fetch(url);
+      if(!res.ok){ console.warn(`Nominatim ${res.status} for ${code}/${cc}`); continue; }
+      const data = await res.json();
+      if(data && data.length > 0){
+        const result = { lat: parseFloat(data[0].lat), lng: parseFloat(data[0].lon), geocodedCountry: cc.toUpperCase() };
+        geocodeCache[key] = result;
+        return result;
+      }
+    } catch(e){
+      console.warn(`Geocode error ${code}/${cc}:`, e.message);
     }
   }
   return null;
 }
 
-async function tryGeocode(code, cc){
-  // Strategy 1: Zippopotam.us — CORS-safe, no auth needed
-  try{
-    const ccLower = cc.toLowerCase();
-    const url = `https://api.zippopotam.us/${ccLower}/${code}`;
-    const res = await fetch(url);
-    if(res.ok){
-      const data = await res.json();
-      if(data.places && data.places.length > 0){
-        return {
-          lat: parseFloat(data.places[0].latitude),
-          lng: parseFloat(data.places[0].longitude),
-          geocodedCountry: cc
-        };
-      }
-    }
-  } catch(e){ console.warn(`Zippopotam failed for ${code}/${cc}:`, e.message); }
-
-  await sleep(100);
-
-  // Strategy 2: Nominatim (no User-Agent header to avoid CORS preflight)
-  try{
-    const url = `https://nominatim.openstreetmap.org/search?postalcode=${encodeURIComponent(code)}&countrycodes=${cc.toLowerCase()}&format=json&limit=1`;
-    const res = await fetch(url, { headers: { 'Accept-Language': 'en' } });
-    if(res.ok){
-      const data = await res.json();
-      if(data && data.length > 0){
-        return {
-          lat: parseFloat(data[0].lat),
-          lng: parseFloat(data[0].lon),
-          geocodedCountry: cc
-        };
-      }
-    }
-  } catch(e){ console.warn(`Nominatim failed for ${code}/${cc}:`, e.message); }
-
-  return null;
-}
+async function tryGeocode(code, cc){ return null; } // stub — not used
 
 function parsePostals(text){
   return [...new Set(
@@ -821,7 +793,7 @@ function buildChips(entry, version, codes, results){
 }
 
 function fitMap(entry){
-  const all=[...entry.postalA,...entry.postalB];
+  const all=[...entry.postalA,...entry.postalB].filter(p=>p.lat!=null && p.lng!=null);
   if(all.length===0) return;
   entry.leaflet.fitBounds(L.latLngBounds(all.map(p=>[p.lat,p.lng])),{padding:[50,50]});
 }
@@ -1211,13 +1183,13 @@ function renderCurrentMode(){
     if(badge){ badge.textContent='VERSION A'; badge.style.color='var(--ca)'; }
     legend.innerHTML=`<div class="legend-item"><div class="ldot" style="background:var(--ca)"></div>Version A</div>`;
     sfooter.style.display='none';
-    pA.forEach(p=>makeCircle([p.lat,p.lng],'rgba(241,93,34,.35)','#f15d22',tooltipFor(p),entry.layerA));
+    pA.forEach(p=>{ if(p.lat!=null && p.lng!=null) makeCircle([p.lat,p.lng],'rgba(241,93,34,.35)','#f15d22',tooltipFor(p),entry.layerA); });
 
   } else if(currentMode==='b'){
     if(badge){ badge.textContent='VERSION B'; badge.style.color='var(--cb)'; }
     legend.innerHTML=`<div class="legend-item"><div class="ldot" style="background:var(--cb)"></div>Version B</div>`;
     sfooter.style.display='none';
-    pB.forEach(p=>makeCircle([p.lat,p.lng],'rgba(255,255,255,.25)','#ffffff',tooltipFor(p),entry.layerB));
+    pB.forEach(p=>{ if(p.lat!=null && p.lng!=null) makeCircle([p.lat,p.lng],'rgba(255,255,255,.25)','#ffffff',tooltipFor(p),entry.layerB); });
 
   } else {
     if(badge){ badge.textContent='DIFF VIEW'; badge.style.color='var(--ca)'; }
@@ -1232,6 +1204,7 @@ function renderCurrentMode(){
     let added=0,removed=0,unchanged=0;
 
     pA.forEach(p=>{
+      if(p.lat==null || p.lng==null) return;
       if(setB.has(p.code)){
         unchanged++;
         makeCircle([p.lat,p.lng],'rgba(120,120,120,.35)','#888888',tooltipFor(p)+' — unchanged',entry.layerDiff);
@@ -1241,6 +1214,7 @@ function renderCurrentMode(){
       }
     });
     pB.forEach(p=>{
+      if(p.lat==null || p.lng==null) return;
       if(!setA.has(p.code)){
         added++;
         makeCircle([p.lat,p.lng],'rgba(241,93,34,.45)','#f15d22',tooltipFor(p)+' — added',entry.layerDiff);
