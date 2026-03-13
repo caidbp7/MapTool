@@ -1547,12 +1547,16 @@ async function confirmImport(){
   fitMap(entry);
   markUnsaved();
 
-  showToast(
-    failed>0
-      ? `Imported ${geocoded.length}, ${failed} not geocoded.`
-      : `Imported ${geocoded.length} postcodes into Version ${importVersion.toUpperCase()}.`,
-    failed>0?'error':'success'
-  );
+  const importMsg = failed > 0
+    ? `Imported ${geocoded.length}, ${failed} not geocoded.`
+    : `Imported ${geocoded.length} postcodes into Version ${importVersion.toUpperCase()}.`;
+
+  showToast(importMsg, failed > 0 ? 'error' : 'success');
+
+  // Auto-save to Supabase if connected
+  if(dbConnected && sbClient){
+    await saveToSupabase();
+  }
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1698,19 +1702,33 @@ async function saveToSupabase(){
   saveBtn.disabled = true;
 
   try {
-    // 1. Tag lists
-    await sbClient.from('zm_tags').delete().neq('id', 0);
+    // 1. Tag lists — upsert all, then delete any that are no longer present
     const tagRows = [
       ...branches.map(n => ({ type:'branch', name:n })),
       ...categories.map(n => ({ type:'category', name:n }))
     ];
     if(tagRows.length){
-      const { error:te } = await sbClient.from('zm_tags').insert(tagRows);
+      const { error:te } = await sbClient.from('zm_tags').upsert(tagRows, { onConflict: 'type,name' });
       if(te) throw te;
     }
+    // Remove stale tags
+    const { data:existingTags } = await sbClient.from('zm_tags').select('type,name');
+    if(existingTags){
+      for(const t of existingTags){
+        const stillExists = t.type==='branch' ? branches.includes(t.name) : categories.includes(t.name);
+        if(!stillExists){
+          await sbClient.from('zm_tags').delete().eq('type', t.type).eq('name', t.name);
+        }
+      }
+    }
 
-    // 2. Filter state
-    await sbClient.from('zm_filter_state').delete().neq('id', 0);
+    // 2. Filter state — delete all rows by their own values, then re-insert
+    const { data:existingFilters } = await sbClient.from('zm_filter_state').select('type,value');
+    if(existingFilters){
+      for(const f of existingFilters){
+        await sbClient.from('zm_filter_state').delete().eq('type', f.type).eq('value', f.value);
+      }
+    }
     const filterRows = [
       ...[...activeFilters.country].map(v => ({ type:'country', value:v })),
       ...[...activeFilters.branch].map(v => ({ type:'branch', value:v })),
@@ -1723,11 +1741,13 @@ async function saveToSupabase(){
 
     // 3. Maps + postcodes
     for(const m of maps){
+      // Upsert map record
       const { error:me } = await sbClient.from('zm_maps').upsert({
         id: String(m.id), name: m.name, updated_at: new Date().toISOString()
-      });
+      }, { onConflict: 'id' });
       if(me) throw me;
 
+      // Delete this map's postcodes by map_id (safe targeted delete), then re-insert
       const { error:de } = await sbClient.from('zm_postcodes').delete().eq('map_id', String(m.id));
       if(de) throw de;
 
@@ -1741,7 +1761,7 @@ async function saveToSupabase(){
       }
     }
 
-    // Remove stale maps from DB
+    // 4. Remove maps from DB that no longer exist locally
     const localIds = maps.map(m => String(m.id));
     const { data:dbMaps } = await sbClient.from('zm_maps').select('id');
     if(dbMaps){
@@ -1750,13 +1770,14 @@ async function saveToSupabase(){
     }
 
     setDBStatus('connected', 'Saved ✓');
-    showToast('All data saved to Supabase.', 'success');
+    showToast('Saved to Supabase.', 'success');
     unsavedChanges = false;
     updateSaveIndicators();
 
   } catch(e){
     setDBStatus('error', 'Save failed');
     showToast(`Save error: ${e.message || e}`, 'error');
+    console.error('Supabase save error:', e);
     document.getElementById('db-info-box').innerHTML = `<span class="err">⚠ Save failed: ${e.message || e}</span>`;
   } finally {
     saveBtn.disabled = false;
@@ -1864,10 +1885,10 @@ window.addEventListener('load', () => {
 
 <!-- ES module: imports Supabase client from config file and wires it into the app -->
 <script type="module">
-  // Add a cache-buster (?v=1) to ensure GitHub isn't serving an old version of the config
-  import { supabaseClient, isConfigured, SUPABASE_URL } from './supabase-config.js?v=1';
+  // The '?v=' + Date.now() trick forces a fresh download every time
+  import { supabaseClient, isConfigured, SUPABASE_URL } from './supabase-config.js?v=' + Date.now();
   
-window.addEventListener('load', () => {
+  window.addEventListener('load', () => {
     // Small delay to ensure the UI is fully painted
     setTimeout(() => {
       console.log("Attempting to initialize Supabase with URL:", SUPABASE_URL);
