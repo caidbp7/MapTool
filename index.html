@@ -793,9 +793,24 @@ function buildChips(entry, version, codes, results){
 }
 
 function fitMap(entry){
-  const all=[...entry.postalA,...entry.postalB].filter(p=>p.lat!=null && p.lng!=null);
-  if(all.length===0) return;
-  entry.leaflet.fitBounds(L.latLngBounds(all.map(p=>[p.lat,p.lng])),{padding:[50,50]});
+  const all=[...entry.postalA,...entry.postalB];
+  const bounds = L.latLngBounds();
+  let hasPoints = false;
+
+  all.forEach(p => {
+    const geo = polyCache[p.code];
+    if(geo && geo !== 'circle'){
+      try{
+        L.geoJSON(geo).getBounds && bounds.extend(L.geoJSON(geo).getBounds());
+        hasPoints = true;
+      } catch(e){}
+    } else if(p.lat != null && p.lng != null){
+      bounds.extend([p.lat, p.lng]);
+      hasPoints = true;
+    }
+  });
+
+  if(hasPoints && bounds.isValid()) entry.leaflet.fitBounds(bounds, {padding:[50,50]});
 }
 
 // ═══════════════════════════════════════════════════════
@@ -1144,16 +1159,68 @@ function renderTagLists(){
 // ═══════════════════════════════════════════════════════
 // DRAW / RENDER
 // ═══════════════════════════════════════════════════════
+// ── Polygon / shape cache ────────────────────────────
+const polyCache = {};  // code → GeoJSON geometry or 'circle' sentinel
+
+async function fetchPolygon(code, country){
+  if(polyCache[code] !== undefined) return polyCache[code];
+
+  // AU: ABS ASGS Postal Areas WFS (free, CORS-enabled, no key needed)
+  if(!country || country === 'AU'){
+    try{
+      const url = `https://geo.abs.gov.au/arcgis/rest/services/ASGS2021/POA/MapServer/0/query`
+        + `?where=POA_CODE21%3D'${code}'&outFields=POA_CODE21`
+        + `&returnGeometry=true&outSR=4326&f=geojson`;
+      const res = await fetch(url);
+      if(res.ok){
+        const data = await res.json();
+        if(data.features && data.features.length > 0){
+          polyCache[code] = data.features[0].geometry;
+          return polyCache[code];
+        }
+      }
+    } catch(e){ console.warn(`ABS polygon fetch failed for ${code}:`, e.message); }
+  }
+
+  // NZ: koordinates.com LINZ postcode boundaries (free, CORS-enabled)
+  if(!country || country === 'NZ'){
+    try{
+      const url = `https://data.linz.govt.nz/services/query/v1/vector.json`
+        + `?key=a8fb9bcd684f43dc8a9a8a8a8a8a8a8a&layer=105056`
+        + `&x=${code}&max_results=1&geometry=true&with_field_names=true`;
+      // LINZ requires an API key — skip for now, fall through to circle
+    } catch(e){}
+  }
+
+  // Fallback: mark as circle so we don't retry
+  polyCache[code] = 'circle';
+  return 'circle';
+}
+
+function makeShape(p, fillColor, strokeColor, label, layer){
+  const geo = polyCache[p.code];
+  const tooltip = `<span style="font-family:'Space Mono',monospace;font-size:.72rem;font-weight:700;color:#fff">${label}</span>`;
+  const style = { fillColor, color: strokeColor, weight: 2, fillOpacity: 0.45, opacity: 0.9 };
+
+  if(geo && geo !== 'circle'){
+    L.geoJSON(geo, {
+      style: () => style,
+      onEachFeature: (_, layer) => layer.bindTooltip(tooltip, { permanent: false, direction: 'top' })
+    }).addTo(layer);
+  } else {
+    // Circle fallback
+    if(p.lat == null || p.lng == null) return;
+    L.circle([p.lat, p.lng], { ...style, radius: 2000 })
+      .bindTooltip(tooltip, { permanent: false, direction: 'top' })
+      .addTo(layer);
+  }
+}
+
+// Legacy alias kept for any direct calls
 function makeCircle(latlng, fillColor, strokeColor, label, layer){
-  L.circle(latlng, {
-    radius:2000, fillColor, color:strokeColor,
-    weight:2, fillOpacity:.45, opacity:.9
-  })
-  .bindTooltip(
-    `<span style="font-family:'Space Mono',monospace;font-size:.72rem;font-weight:700;color:#fff">${label}</span>`,
-    {permanent:false, direction:'top'}
-  )
-  .addTo(layer);
+  L.circle(latlng, { radius:2000, fillColor, color:strokeColor, weight:2, fillOpacity:.45, opacity:.9 })
+    .bindTooltip(`<span style="font-family:'Space Mono',monospace;font-size:.72rem;font-weight:700;color:#fff">${label}</span>`, {permanent:false,direction:'top'})
+    .addTo(layer);
 }
 
 function tooltipFor(p){
@@ -1164,7 +1231,7 @@ function tooltipFor(p){
   return p.code + (tags.length ? ` · ${tags.join(' · ')}` : '');
 }
 
-function renderCurrentMode(){
+async function renderCurrentMode(){
   const entry=getActive();
   if(!entry) return;
 
@@ -1179,17 +1246,21 @@ function renderCurrentMode(){
   const pA = filterPostcodes(entry.postalA);
   const pB = filterPostcodes(entry.postalB);
 
+  // Pre-fetch all polygons needed for this render (parallel, cached after first fetch)
+  const allCodes = [...new Set([...pA, ...pB].map(p => p))];
+  await Promise.all(allCodes.map(p => fetchPolygon(p.code, p.country)));
+
   if(currentMode==='a'){
     if(badge){ badge.textContent='VERSION A'; badge.style.color='var(--ca)'; }
     legend.innerHTML=`<div class="legend-item"><div class="ldot" style="background:var(--ca)"></div>Version A</div>`;
     sfooter.style.display='none';
-    pA.forEach(p=>{ if(p.lat!=null && p.lng!=null) makeCircle([p.lat,p.lng],'rgba(241,93,34,.35)','#f15d22',tooltipFor(p),entry.layerA); });
+    pA.forEach(p => makeShape(p,'rgba(241,93,34,.35)','#f15d22',tooltipFor(p),entry.layerA));
 
   } else if(currentMode==='b'){
     if(badge){ badge.textContent='VERSION B'; badge.style.color='var(--cb)'; }
     legend.innerHTML=`<div class="legend-item"><div class="ldot" style="background:var(--cb)"></div>Version B</div>`;
     sfooter.style.display='none';
-    pB.forEach(p=>{ if(p.lat!=null && p.lng!=null) makeCircle([p.lat,p.lng],'rgba(255,255,255,.25)','#ffffff',tooltipFor(p),entry.layerB); });
+    pB.forEach(p => makeShape(p,'rgba(255,255,255,.25)','#ffffff',tooltipFor(p),entry.layerB));
 
   } else {
     if(badge){ badge.textContent='DIFF VIEW'; badge.style.color='var(--ca)'; }
@@ -1207,17 +1278,17 @@ function renderCurrentMode(){
       if(p.lat==null || p.lng==null) return;
       if(setB.has(p.code)){
         unchanged++;
-        makeCircle([p.lat,p.lng],'rgba(120,120,120,.35)','#888888',tooltipFor(p)+' — unchanged',entry.layerDiff);
+        makeShape(p,'rgba(120,120,120,.35)','#888888',tooltipFor(p)+' — unchanged',entry.layerDiff);
       } else {
         removed++;
-        makeCircle([p.lat,p.lng],'rgba(255,255,255,.25)','#ffffff',tooltipFor(p)+' — removed',entry.layerDiff);
+        makeShape(p,'rgba(255,255,255,.25)','#ffffff',tooltipFor(p)+' — removed',entry.layerDiff);
       }
     });
     pB.forEach(p=>{
       if(p.lat==null || p.lng==null) return;
       if(!setA.has(p.code)){
         added++;
-        makeCircle([p.lat,p.lng],'rgba(241,93,34,.45)','#f15d22',tooltipFor(p)+' — added',entry.layerDiff);
+        makeShape(p,'rgba(241,93,34,.45)','#f15d22',tooltipFor(p)+' — added',entry.layerDiff);
       }
     });
 
