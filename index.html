@@ -1867,12 +1867,12 @@ window.addEventListener('load', () => {
   // Add a cache-buster (?v=1) to ensure GitHub isn't serving an old version of the config
   import { supabaseClient, isConfigured, SUPABASE_URL } from './supabase-config.js?v=1';
   
-  window.addEventListener('load', () => {
-    if (typeof initSupabase === 'function') {
+window.addEventListener('load', () => {
+    // Small delay to ensure the UI is fully painted
+    setTimeout(() => {
+      console.log("Attempting to initialize Supabase with URL:", SUPABASE_URL);
       initSupabase(supabaseClient, isConfigured, SUPABASE_URL);
-    } else {
-      console.error("initSupabase function not found in global scope.");
-    }
+    }, 100);
   });
 </script>
 </body>
