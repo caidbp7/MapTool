@@ -1864,10 +1864,15 @@ window.addEventListener('load', () => {
 
 <!-- ES module: imports Supabase client from config file and wires it into the app -->
 <script type="module">
-  import { supabaseClient, isConfigured, SUPABASE_URL } from './supabase-config.js';
-  // Wait for the main load listener to fire first, then connect
+  // Add a cache-buster (?v=1) to ensure GitHub isn't serving an old version of the config
+  import { supabaseClient, isConfigured, SUPABASE_URL } from './supabase-config.js?v=1';
+  
   window.addEventListener('load', () => {
-    initSupabase(supabaseClient, isConfigured, SUPABASE_URL);
+    if (typeof initSupabase === 'function') {
+      initSupabase(supabaseClient, isConfigured, SUPABASE_URL);
+    } else {
+      console.error("initSupabase function not found in global scope.");
+    }
   });
 </script>
 </body>
