@@ -438,6 +438,11 @@ header{display:flex;align-items:center;gap:10px;padding:8px 16px;border-bottom:1
           <button class="db-schema-btn" onclick="toggleSchema()">SQL Schema</button>
         </div>
 
+        <div class="db-btn-row" style="margin-top:4px">
+          <button class="db-schema-btn" style="flex:1" onclick="debugDirectInsert()">🔬 Test Insert</button>
+          <button class="db-schema-btn" style="flex:1" onclick="debugInspectState()">🔍 Inspect State</button>
+        </div>
+
         <div id="schema-area" style="display:none;flex-direction:column;gap:5px">
           <div class="db-field-label">Run this in Supabase → SQL Editor:</div>
           <div class="schema-box" id="schema-box"></div>
@@ -1912,6 +1917,68 @@ function updateSaveIndicators(){
   if(!dbConnected) return;
   btn.textContent = unsavedChanges ? '↑ Save ●' : '↑ Save';
   btn.style.background = unsavedChanges ? 'var(--cd)' : 'var(--cc)';
+}
+
+// ── DEBUG HELPERS ────────────────────────────────────
+async function debugDirectInsert(){
+  const info = document.getElementById('db-info-box');
+  info.innerHTML = '<b>Running direct insert test...</b>';
+  const log = (msg, type) => {
+    const color = type==='ok'?'#f15d22':type==='err'?'#ff4444':'#aaa';
+    info.innerHTML += '<div style="color:'+color+';margin-top:2px;font-size:.58rem">'+msg+'</div>';
+    console.log('[Test]', msg);
+  };
+
+  if(!sbClient){ log('No sbClient — not connected', 'err'); return; }
+
+  try {
+    // Step 1: insert a test map row
+    const testMapId = 'test-debug-'+Date.now();
+    log('1. Inserting test map row id='+testMapId+'...');
+    const { error:me } = await sbClient.from('zm_maps').upsert(
+      { id: testMapId, name: 'DEBUG TEST' },
+      { onConflict: 'id' }
+    );
+    if(me){ log('zm_maps insert FAILED: '+me.message+' ('+me.code+')', 'err'); return; }
+    log('zm_maps insert OK', 'ok');
+
+    // Step 2: insert a single test postcode row
+    log('2. Inserting test postcode row...');
+    const { error:pe } = await sbClient.from('zm_postcodes').insert({
+      map_id: testMapId, code: '3000', version: 'a',
+      lat: -37.814, lng: 144.963, country: 'AU', branch: 'test', cat: 'test'
+    });
+    if(pe){ log('zm_postcodes insert FAILED: '+pe.message+' ('+pe.code+') hint:'+pe.hint+' detail:'+pe.details, 'err'); }
+    else { log('zm_postcodes insert OK - check your DB!', 'ok'); }
+
+    // Step 3: clean up test rows
+    await sbClient.from('zm_maps').delete().eq('id', testMapId);
+    log('3. Cleaned up test rows', 'ok');
+
+  } catch(e){
+    log('Exception: '+(e.message||JSON.stringify(e)), 'err');
+    console.error('[Test]', e);
+  }
+}
+
+function debugInspectState(){
+  const info = document.getElementById('db-info-box');
+  info.innerHTML = '<b>Current app state:</b>';
+  const log = (msg) => {
+    info.innerHTML += '<div style="color:#aaa;margin-top:2px;font-size:.58rem">'+msg+'</div>';
+    console.log('[State]', msg);
+  };
+
+  log('dbConnected: '+dbConnected);
+  log('sbClient: '+(sbClient?'YES':'null'));
+  log('maps.length: '+maps.length);
+  maps.forEach((m,i) => {
+    log('Map['+i+'] "'+m.name+'" id='+m.id+' | postalA='+m.postalA.length+' postalB='+m.postalB.length);
+    if(m.postalA.length > 0) log('  postalA[0]: '+JSON.stringify(m.postalA[0]));
+    if(m.postalB.length > 0) log('  postalB[0]: '+JSON.stringify(m.postalB[0]));
+  });
+  log('branches: '+JSON.stringify(branches));
+  log('categories: '+JSON.stringify(categories));
 }
 
 // ═══════════════════════════════════════════════════════
